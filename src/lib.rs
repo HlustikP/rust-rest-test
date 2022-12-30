@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, io, fs};
 
 use serde::{Serialize, Deserialize};
-use hyper::{body::HttpBody as _, StatusCode};
+use hyper::{body::HttpBody as _};
 use hyper_tls::HttpsConnector;
 use strum_macros::EnumIter;
 use strum::IntoEnumIterator;
@@ -11,7 +11,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 
 #[allow(non_camel_case_types)]
 #[derive(strum_macros::Display, EnumIter)]
-enum HttpMethods {
+enum HttpMethod {
     get,
     post,
     put,
@@ -43,22 +43,36 @@ fn get_cwd() -> PathBuf {
     return env::current_dir().unwrap();
 }
 
-fn validate_http_method(method: &String) -> bool {
-    for http_method in HttpMethods::iter() {
+fn validate_http_method(method: &String) -> Option<HttpMethod> {
+    for http_method in HttpMethod::iter() {
         if http_method.to_string() == method.to_string().to_lowercase() {
-            return true;
+            return Some(http_method);
         }
     }
-    return false
+    return None
 }
 
-async fn fetch_url(url: hyper::Uri, verbose: bool) -> Result<StatusCode> {
+async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool) -> 
+    Result<hyper::Response<hyper::Body>> {
     let https = HttpsConnector::new();
 
-    let client = hyper::Client::builder().
-        build::<_, hyper::Body>(https);
+    let req = hyper::Request::builder()
+        .method(match method {
+            HttpMethod::get => hyper::Method::GET,
+            HttpMethod::post => hyper::Method::POST,
+            HttpMethod::put => hyper::Method::PUT,
+            HttpMethod::patch => hyper::Method::PATCH,
+            HttpMethod::delete => hyper::Method::DELETE,
+            HttpMethod::head => hyper::Method::HEAD,
+            HttpMethod::options => hyper::Method::OPTIONS,
+        })
+        .uri(url)
+        .header("content-type", "application/json")
+        .body(hyper::Body::from(r#"{"library":"hyper"}"#))?;
 
-    let mut response = client.get(url).await?;
+    let client = hyper::Client::builder().build(https);
+
+    let mut response = client.request(req).await?;
 
     println!("Response Status: {}", response.status());
 
@@ -72,7 +86,7 @@ async fn fetch_url(url: hyper::Uri, verbose: bool) -> Result<StatusCode> {
         }
     };
 
-    return Ok(response.status());
+    return Ok(response);
 }
 
 pub async fn execute_tests() {
@@ -93,37 +107,52 @@ pub async fn execute_tests() {
     };
 
     let test_count = rest_test_config.tests.len();
-    let mut method: &String;
+    let mut method: HttpMethod;
     let mut route: &String;
-    let mut i = 1;
+    let mut test_index = 0;
+    let mut tests_passed = 0;
 
-    for test in rest_test_config.tests.iter() {
-        println!("Test {}/{}", i, test_count);
-        method = &test.method;
+    for test in rest_test_config.tests.iter() { 
+        test_index += 1;
+
+        // Print current test index
+        println!("Test {}/{}", test_index, test_count);
+
+        // Print test description if available
+        match &test.it { 
+            Some(description) => println!("it {}", description),
+            None => (),
+        };
+
+        // Check if the http method is valid
+        method = match validate_http_method(&test.method) {
+            Some(value) => value,
+            None => panic!("Unknown or unsupported method {}", test.method.to_string()),
+        };
+
+        // Construct the api url
         route = &test.route;
-
-        if !validate_http_method(method) {
-            panic!("Invalid http method used: {:?}", method);
-        }
-    
         let url = api_address.to_owned() + route;
-    
         let url = url.parse::<hyper::Uri>().unwrap();
     
-        let result = match fetch_url(url, verbose).await {
+        // Send the request and get the response
+        let result = match fetch_url(url, method, verbose).await {
             Ok(res) => res,
             Err(error) => panic!("Error while sending request: {:?}",
                 error),
         };
 
-        println!("Expected Status: {}", result);
+        // Check expectations
+        println!("Expected Status: {}", result.status());
 
-        if result == test.status {
+        // Print outcome
+        if result.status() == test.status {
+            tests_passed += 1;
             println!("{}", "TEST PASSED\n".green().bold())
         } else {
             println!("{}", "TEST FAILED\n".red().bold())
         }
-
-        i += 1;
     }
+
+    println!("{} out of {} tests passed.", tests_passed, test_count)
 }
