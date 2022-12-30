@@ -1,0 +1,16 @@
+[package]
+name = "rust-rest-test"
+version = "0.1.0"
+edition = "2021"
+authors = ["Patrick Hlustik"]
+license = "MIT"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9.16"
+strum = "0.24.1"
+strum_macros = "0.24.3"
+hyper = { version = "0.14", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+hyper-tls = "0.5.0"
+colored = "2.0.0"
