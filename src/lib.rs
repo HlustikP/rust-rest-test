@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, io, fs};
+use std::{io, fs};
 
 use serde::{Serialize, Deserialize};
 use hyper::{body::HttpBody as _};
@@ -6,6 +6,8 @@ use hyper_tls::HttpsConnector;
 use strum_macros::EnumIter;
 use strum::IntoEnumIterator;
 use colored::*;
+
+mod utils;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -24,6 +26,7 @@ enum HttpMethod {
 #[derive(Debug, Serialize, Deserialize)]
 struct Endpoint {
     it: Option<String>,
+    critical: Option<bool>,
     route: String,
     method: String,
     status: u16,
@@ -37,10 +40,7 @@ struct Config {
     bearer_token: Option<String>,
     username: Option<String>,
     password: Option<String>,
-}
-
-fn get_cwd() -> PathBuf {
-    return env::current_dir().unwrap();
+    time_boundaries: [u32; 3],
 }
 
 fn validate_http_method(method: &String) -> Option<HttpMethod> {
@@ -49,13 +49,16 @@ fn validate_http_method(method: &String) -> Option<HttpMethod> {
             return Some(http_method);
         }
     }
-    return None
+    return None;
 }
 
 async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool) -> 
     Result<hyper::Response<hyper::Body>> {
+    
+    // TLS implementation to enable https requests
     let https = HttpsConnector::new();
 
+    // map local http methods to the ones used by hyper
     let req = hyper::Request::builder()
         .method(match method {
             HttpMethod::get => hyper::Method::GET,
@@ -90,7 +93,7 @@ async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool) ->
 }
 
 pub async fn execute_tests() {
-    let cwd = get_cwd();
+    let cwd = utils::get_cwd();
     let rest_test_filename = "rest-test.yaml";
 
     let test_config_file = fs::File::open(cwd.join(rest_test_filename)).
@@ -136,17 +139,17 @@ pub async fn execute_tests() {
         let url = url.parse::<hyper::Uri>().unwrap();
     
         // Send the request and get the response
-        let result = match fetch_url(url, method, verbose).await {
+        let response = match fetch_url(url, method, verbose).await {
             Ok(res) => res,
             Err(error) => panic!("Error while sending request: {:?}",
                 error),
         };
 
         // Check expectations
-        println!("Expected Status: {}", result.status());
+        println!("Expected Status: {}", response.status());
 
         // Print outcome
-        if result.status() == test.status {
+        if response.status() == test.status {
             tests_passed += 1;
             println!("{}", "TEST PASSED\n".green().bold())
         } else {
