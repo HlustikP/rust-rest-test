@@ -44,13 +44,10 @@ struct Config {
     time_boundaries: Option<[u128; 3]>, // (green), yellow, red, timeout
 }
 
+// Checks if a given method matched one of HttpMethod
 fn validate_http_method(method: &String) -> Option<HttpMethod> {
-    for http_method in HttpMethod::iter() {
-        if http_method.to_string() == method.to_string().to_lowercase() {
-            return Some(http_method);
-        }
-    }
-    return None;
+    return HttpMethod::iter().find(|http_method|
+         http_method.to_string() == method.to_string().to_lowercase());
 }
 
 async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool, timeout: u128,
@@ -120,10 +117,8 @@ pub async fn execute_tests() {
 
     let api_address = &rest_test_config.api_address;
 
-    let verbose = match rest_test_config.verbose {
-        None => true, // Default to verbose output
-        Some(value) => value,
-    };
+    // Get verbose value, default to true
+    let verbose = rest_test_config.verbose.unwrap_or(true);
 
     let test_count = rest_test_config.tests.len();
     let mut method: HttpMethod;
@@ -132,19 +127,14 @@ pub async fn execute_tests() {
     let mut tests_passed = 0;
     let mut response_time: u128 = 0;
 
-    let time_boundaries = match rest_test_config.time_boundaries {
-        Some(value) => value,
-        None => [500, 1000, 10000], // defaults
-    };
+    // Get boundaries, set to default values if not found
+    let time_boundaries = rest_test_config.time_boundaries.unwrap_or([500, 1000, 10000]);
 
     for test in rest_test_config.tests.iter() { 
         test_index += 1;
 
-        // Determine criticalness
-        let is_critical = match test.critical {
-            Some(value) => value,
-            None => false,
-        };
+        // Determine criticalness, default to false
+        let is_critical = test.critical.unwrap_or(false);
 
         // Print current test index
         println!("Test {}/{}", test_index, test_count);
@@ -158,7 +148,7 @@ pub async fn execute_tests() {
         // Check if the http method is valid
         method = match validate_http_method(&test.method) {
             Some(value) => value,
-            None => panic!("Unknown or unsupported method {}", test.method.to_string()),
+            None => panic!("Unknown or unsupported method {}", test.method),
         };
 
         // Construct the api url
@@ -174,8 +164,8 @@ pub async fn execute_tests() {
                 },
             None => body = String::from(""),
         };
-        // json doestn allow a comma after the last key-value pair
-        if body.ends_with(",") {
+        // json doesnt allow a comma after the last key-value pair
+        if body.ends_with(',') {
             body.pop();
         }
         body += "}";
