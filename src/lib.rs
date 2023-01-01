@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::{io, fs};
+use std::time::{Instant, Duration};
 
 use serde::{Serialize, Deserialize};
 use hyper::{body::HttpBody as _};
@@ -30,6 +32,7 @@ struct Endpoint {
     route: String,
     method: String,
     status: u16,
+    json_body: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,9 +41,7 @@ struct Config {
     verbose: Option<bool>,
     tests: Vec<Endpoint>,
     bearer_token: Option<String>,
-    username: Option<String>,
-    password: Option<String>,
-    time_boundaries: [u32; 3],
+    time_boundaries: Option<[u128; 3]>, // (green), yellow, red, timeout
 }
 
 fn validate_http_method(method: &String) -> Option<HttpMethod> {
@@ -52,9 +53,9 @@ fn validate_http_method(method: &String) -> Option<HttpMethod> {
     return None;
 }
 
-async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool) -> 
-    Result<hyper::Response<hyper::Body>> {
-    
+async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool, timeout: u128,
+     body: String, response_time: &mut u128 /*OUT*/) -> Result<hyper::Response<hyper::Body>> {
+     
     // TLS implementation to enable https requests
     let https = HttpsConnector::new();
 
@@ -71,11 +72,26 @@ async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool) ->
         })
         .uri(url)
         .header("content-type", "application/json")
-        .body(hyper::Body::from(r#"{"library":"hyper"}"#))?;
+        .body(hyper::Body::from(body))?;
 
     let client = hyper::Client::builder().build(https);
 
-    let mut response = client.request(req).await?;
+    let now = Instant::now();
+
+    let future_response = client.request(req);
+
+    let mut response: hyper:: Response<hyper::Body>;
+
+    response = match tokio::time::timeout(Duration::from_millis(timeout.try_into().unwrap()),
+     future_response).await {
+        Ok(result) => match result {
+            Ok(res) => res,
+            Err(e) => return Err(Box::new(e)),
+        },
+        Err(_) => return Err("Request timed out.".into()),
+    };
+
+    *response_time = now.elapsed().as_millis();
 
     println!("Response Status: {}", response.status());
 
@@ -114,9 +130,21 @@ pub async fn execute_tests() {
     let mut route: &String;
     let mut test_index = 0;
     let mut tests_passed = 0;
+    let mut response_time: u128 = 0;
+
+    let time_boundaries = match rest_test_config.time_boundaries {
+        Some(value) => value,
+        None => [500, 1000, 10000], // defaults
+    };
 
     for test in rest_test_config.tests.iter() { 
         test_index += 1;
+
+        // Determine criticalness
+        let is_critical = match test.critical {
+            Some(value) => value,
+            None => false,
+        };
 
         // Print current test index
         println!("Test {}/{}", test_index, test_count);
@@ -137,14 +165,45 @@ pub async fn execute_tests() {
         route = &test.route;
         let url = api_address.to_owned() + route;
         let url = url.parse::<hyper::Uri>().unwrap();
-    
+
+        // Construct json body for the request
+        let mut body: String = String::from("{");
+        match &test.json_body{
+            Some(value_map) => for (key, val) in value_map.iter() {
+                    body += &format!("\"{}\":\"{}\",", key, val);
+                },
+            None => body = String::from(""),
+        };
+        // json doestn allow a comma after the last key-value pair
+        if body.ends_with(",") {
+            body.pop();
+        }
+        body += "}";
+
         // Send the request and get the response
-        let response = match fetch_url(url, method, verbose).await {
+        let response = match fetch_url(url, method,
+             verbose, time_boundaries[2], body, &mut response_time).await {
             Ok(res) => res,
-            Err(error) => panic!("Error while sending request: {:?}",
-                error),
+            Err(error) => { 
+                println!("Error while sending request: {}", error);
+                if is_critical {
+                    println!("Test marked as 'critical' failed, cancelling all further tests.");
+                    return;
+                }
+                continue
+            },
         };
 
+        let response_time_output = format!("Response time: {} ms", response_time);
+
+        if response_time < time_boundaries[0] {
+            println!("{}", response_time_output.green());
+        } else if response_time < time_boundaries[1] {
+            println!("{}", response_time_output.yellow());
+        } else {
+            println!("{}", response_time_output.red());
+        }
+ 
         // Check expectations
         println!("Expected Status: {}", response.status());
 
@@ -153,6 +212,11 @@ pub async fn execute_tests() {
             tests_passed += 1;
             println!("{}", "TEST PASSED\n".green().bold())
         } else {
+            if is_critical {
+                println!("Test marked as 'critical' failed, cancelling all further tests.");
+                return;
+            }
+
             println!("{}", "TEST FAILED\n".red().bold())
         }
     }
