@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::{io, fs};
 use std::time::{Instant, Duration};
 
+use hyper::http::HeaderValue;
 use serde::{Serialize, Deserialize};
 use hyper::{body::HttpBody as _};
 use hyper_tls::HttpsConnector;
@@ -35,7 +36,8 @@ struct Endpoint {
     status: u16,
     json_body: Option<HashMap<String, String>>,
     time_boundaries: Option<[u128; 3]>, // (green), yellow, red, timeout
-    capture: Option<HashMap<String, String>>
+    capture: Option<HashMap<String, String>>,
+    bearer_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,22 +49,32 @@ struct Config {
     caption_path: Option<Vec<String>>,
 }
 
+struct TestRequest<'a> {
+    url: &'a hyper::Uri,
+    method: &'a HttpMethod,
+    verbose: bool,
+    timeout: u128,
+    body: String,
+    response_time: &'a mut u128,
+    buffer: &'a mut bytes::BytesMut,
+    bearer_token: Option<String>,
+}
+
 // Checks if a given method matched one of HttpMethod
 fn validate_http_method(method: &String) -> Option<HttpMethod> {
     return HttpMethod::iter().find(|http_method|
          http_method.to_string() == method.to_string().to_lowercase());
 }
 
-async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool, timeout: u128,
-     body: String, response_time: &mut u128 /*OUT*/, buffer: &mut bytes::BytesMut /*OUT*/)
+async fn fetch_url(test_request: &mut TestRequest<'_>)
      -> Result<hyper::Response<hyper::Body>> {
      
     // TLS implementation to enable https requests
     let https = HttpsConnector::new();
 
     // map local http methods to the ones used by hyper
-    let req = hyper::Request::builder()
-        .method(match method {
+    let mut req_builder = hyper::Request::builder()
+        .method(match test_request.method {
             HttpMethod::get => hyper::Method::GET,
             HttpMethod::post => hyper::Method::POST,
             HttpMethod::put => hyper::Method::PUT,
@@ -71,9 +83,27 @@ async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool, timeout: 
             HttpMethod::head => hyper::Method::HEAD,
             HttpMethod::options => hyper::Method::OPTIONS,
         })
-        .uri(url)
-        .header("content-type", "application/json")
-        .body(hyper::Body::from(body))?;
+        .uri(test_request.url);
+
+    match &test_request.bearer_token {
+        Some(token) => {
+            let mut composed_token = String::from("");
+            composed_token += "Bearer ";
+            println!("Token: {}", token);
+            composed_token += &token.clone();
+
+            match req_builder.headers_mut() {
+                Some(map) => {
+                    println!("Composed token: {}", composed_token);
+                    map.insert("Authorization", composed_token.parse::<HeaderValue>()?);
+                },
+                None => (),
+            };
+        },
+        None => (),
+    };
+
+    let req = req_builder.body(hyper::Body::from(test_request.body.clone()))?;
 
     let client = hyper::Client::builder().build(https);
 
@@ -83,7 +113,7 @@ async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool, timeout: 
 
     let mut response: hyper:: Response<hyper::Body>;
 
-    response = match tokio::time::timeout(Duration::from_millis(timeout.try_into().unwrap()),
+    response = match tokio::time::timeout(Duration::from_millis(test_request.timeout.try_into().unwrap()),
      future_response).await {
         Ok(result) => match result {
             Ok(res) => res,
@@ -92,21 +122,21 @@ async fn fetch_url(url: hyper::Uri, method: HttpMethod, verbose: bool, timeout: 
         Err(_) => return Err("Request timed out.".into()),
     };
 
-    *response_time = now.elapsed().as_millis();
+    *test_request.response_time = now.elapsed().as_millis();
 
     println!("Response Status: {}", response.status());
 
     // stream body data into buffer
     while let Some(next) = response.data().await {
-        buffer.put(next?);
+        test_request.buffer.put(next?);
     }
 
-    if verbose {
+    if test_request.verbose {
         println!("Response Header: {:#?}", response.headers());
 
-        if !buffer.is_empty() {
+        if !test_request.buffer.is_empty() {
             println!("Response Body: ");
-            io::Write::write_all(&mut io::stdout(), buffer)?;
+            io::Write::write_all(&mut io::stdout(), test_request.buffer)?;
         }
     };
 
@@ -125,8 +155,8 @@ pub async fn execute_tests() {
 
     let api_address = &rest_test_config.api_address;
 
-    // Get verbose value, default to true
-    let verbose = rest_test_config.verbose.unwrap_or(true);
+    // Get verbose value, default to false
+    let verbose = rest_test_config.verbose.unwrap_or(false);
 
     let test_count = rest_test_config.tests.len();
     let mut test_index = 0;
@@ -178,6 +208,7 @@ pub async fn execute_tests() {
                 },
             None => body = String::from(""),
         };
+
         // json doesnt allow a comma after the last key-value pair
         if body.ends_with(',') {
             body.pop();
@@ -187,9 +218,29 @@ pub async fn execute_tests() {
         // Create buffer for the response body
         let mut buffer = bytes::BytesMut::with_capacity(512);
 
+        println!("Capture Key: {}", test.bearer_token.clone().unwrap_or("".to_string()));
+
+        // Construct request data struct
+        let mut test_request = TestRequest {
+            url: &url,
+            method: &method,
+            verbose,
+            timeout: time_boundaries[2],
+            body,
+            response_time: &mut response_time,
+            buffer: &mut buffer,
+            // bearer_token: match captures.get(&"bearer_token".to_string()) {
+            //          Some(val) => Some(val.clone()),
+            //          None => None,
+            // },
+            bearer_token: match captures.get(&test.bearer_token.clone().unwrap_or("".to_string())) {
+                Some(val) => Some(val.clone()),
+                None => None,
+            },
+        };
+
         // Send the request and get the response
-        let response = match fetch_url(url, method,
-             verbose, time_boundaries[2], body, &mut response_time, &mut buffer).await {
+        let response = match fetch_url(&mut test_request).await {
             Ok(res) => res,
             Err(error) => { 
                 println!("Error while sending request: {}", error);
@@ -203,7 +254,8 @@ pub async fn execute_tests() {
 
         let response_status = response.status();
 
-        if !buffer.is_empty() {
+        // Parse the response body as long as its not empty and (probably) a json
+        if !buffer.is_empty() && buffer[0] == b'{' {
         let json_body: serde_json::Value = match serde_json::from_str(&String::from_utf8_lossy(&buffer)) {
                 Ok(value) => value,
                 Err(error) => {
@@ -211,15 +263,22 @@ pub async fn execute_tests() {
                     continue;
                 },
             };
-
-        
+    
             // Capture desired values from the response body
             match &test.capture {
                 Some(capture) => {
                     for (key, value) in capture.iter() {
                         let captured_value = &json_body["data"][value];
                         if !captured_value.is_null() {
-                            captures.insert(key.to_string(), json_body["data"][value].to_string());
+                            let mut string_captured = json_body["data"][value].to_string();
+
+                            // Remove Double Quotes
+                            string_captured.pop();
+                            if !string_captured.is_empty() {
+                                string_captured.remove(0);
+                            }
+
+                            captures.insert(key.to_string(), string_captured);
                         } else {
                             println!("Cannot capture nonexistent value '{}'", value.bold());
                         }
