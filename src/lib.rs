@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::{io, fs};
+use std::{io, fs, path};
 use std::time::{Instant, Duration};
 
 use hyper::http::HeaderValue;
@@ -10,10 +10,21 @@ use strum_macros::EnumIter;
 use strum::IntoEnumIterator;
 use colored::*;
 use bytes::BufMut;
+use clap::Parser;
 
 mod utils;
+mod cli;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+// Prints a string and appens a newline if a given condition evaluates to true
+macro_rules! printlnif {
+    ($condition: expr, $($x:tt)*) => { 
+        if $condition { 
+            println!($($x)*);
+        }
+    }
+}
 
 #[allow(non_camel_case_types)]
 #[derive(strum_macros::Display, EnumIter)]
@@ -58,6 +69,21 @@ struct TestRequest<'a> {
     response_time: &'a mut u128,
     buffer: &'a mut bytes::BytesMut,
     bearer_token: Option<String>,
+}
+
+pub fn get_config_file() -> path::PathBuf {
+    let args = cli::Args::parse();
+
+    // Use command line input
+    if let Some(config_path) = args.file.as_deref() {
+        return path::PathBuf::from(config_path);
+    } else {
+        // Otherwise use default (looking for it inside the cwd)
+        let cwd = utils::get_cwd();
+        let rest_test_filename = "rest-test.yaml";
+
+        return cwd.join(rest_test_filename);
+    }
 }
 
 // Checks if a given method matched one of HttpMethod
@@ -131,27 +157,34 @@ async fn fetch_url(test_request: &mut TestRequest<'_>)
         test_request.buffer.put(next?);
     }
 
-    if test_request.verbose {
-        println!("Response Header: {:#?}", response.headers());
+    printlnif!(test_request.verbose, "Response Header: {:#?}", response.headers());
 
-        if !test_request.buffer.is_empty() {
-            println!("Response Body: ");
-            io::Write::write_all(&mut io::stdout(), test_request.buffer)?;
-        }
-    };
+    if !test_request.buffer.is_empty() {
+        printlnif!(test_request.verbose, "Response Body: ");
+        io::Write::write_all(&mut io::stdout(), test_request.buffer)?;
+    }
 
     return Ok(response);
 }
 
-pub async fn execute_tests() {
-    let cwd = utils::get_cwd();
-    let rest_test_filename = "rest-test.yaml";
-
-    let test_config_file = fs::File::open(cwd.join(rest_test_filename)).
-        expect("Could not open file.");
+pub async fn execute_tests(config_file: path::PathBuf) {
+    // Open and read config file
+    let test_config_file = match fs::File::open(config_file) {
+        Ok(file) => file,
+        Err(error) => {
+            println!("Error while trying to open config file: {}", error);
+            return;
+        }
+    };
     
-    let rest_test_config: Config = serde_yaml::from_reader(test_config_file).
-        expect("Could not read values.");
+    // Parse config yaml file
+    let rest_test_config: Config = match serde_yaml::from_reader(test_config_file) {
+        Ok(config) => config,
+        Err(error) => {
+            println!("Error while parsing config file: {}", error);
+            return;
+        }
+    };
 
     let api_address = &rest_test_config.api_address;
 
@@ -218,7 +251,7 @@ pub async fn execute_tests() {
         // Create buffer for the response body
         let mut buffer = bytes::BytesMut::with_capacity(512);
 
-        println!("Capture Key: {}", test.bearer_token.clone().unwrap_or("".to_string()));
+        printlnif!(verbose, "Capture Key: {}", test.bearer_token.clone().unwrap_or("".to_string()));
 
         // Construct request data struct
         let mut test_request = TestRequest {
@@ -229,10 +262,6 @@ pub async fn execute_tests() {
             body,
             response_time: &mut response_time,
             buffer: &mut buffer,
-            // bearer_token: match captures.get(&"bearer_token".to_string()) {
-            //          Some(val) => Some(val.clone()),
-            //          None => None,
-            // },
             bearer_token: match captures.get(&test.bearer_token.clone().unwrap_or("".to_string())) {
                 Some(val) => Some(val.clone()),
                 None => None,
