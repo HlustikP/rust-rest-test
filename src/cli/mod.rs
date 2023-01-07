@@ -1,5 +1,3 @@
-use clap;
-
 #[derive(clap::Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {

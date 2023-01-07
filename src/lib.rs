@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::{io, fs, path};
+use std::path::PathBuf;
+use std::{io, io::Write, fs, path};
 use std::time::{Instant, Duration};
 
 use hyper::http::HeaderValue;
@@ -11,6 +12,7 @@ use strum::IntoEnumIterator;
 use colored::*;
 use bytes::BufMut;
 use clap::Parser;
+use chrono::{self, Datelike};
 
 mod utils;
 mod cli;
@@ -49,6 +51,7 @@ struct Endpoint {
     time_boundaries: Option<[u128; 3]>, // (green), yellow, red, timeout
     capture: Option<HashMap<String, String>>,
     bearer_token: Option<String>,
+    auto_description: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +61,7 @@ struct Config {
     tests: Vec<Endpoint>,
     time_boundaries: Option<[u128; 3]>, // (green), yellow, red, timeout
     caption_path: Option<Vec<String>>,
+    to_file: Option<PathBuf>,
 }
 
 struct TestRequest<'a> {
@@ -71,6 +75,92 @@ struct TestRequest<'a> {
     bearer_token: Option<String>,
 }
 
+// Get the number of files matching a certain pattern inside a directory
+fn get_file_iteration(directory: path::PathBuf, pattern: &String) -> Result<usize> {
+    // Get all files in directory matching the pattern
+    return Ok(fs::read_dir(directory)?
+        .into_iter()
+        .filter(|file| file.is_ok())
+        .map(|file| file.unwrap().path()) // safe unwrap call inside Ok
+        .filter(|file| file.is_file())
+        .filter(|file| file.to_str().unwrap_or_default().contains(pattern))
+        .count());
+}
+
+// Creates the name of the logfile based on the current time
+fn construct_logfile_name(directory: PathBuf) -> Result<String> {
+    // rrt-YEAR-MONTH-DAY-ITERATOR.log
+    // rrt-2023-07-01-00.log
+    // rrt-2023-07-01-01.log etc
+    let current_date = chrono::Utc::now().date_naive();
+
+    let date_filename = format!(
+        "rrt-{}-{}-{}",
+        current_date.year() - 2000,
+        current_date.month0(),
+        current_date.day0());
+
+    let iterations = get_file_iteration(directory, &date_filename)?;
+
+    // Prepend 0 on single digit itertions counts
+    let iteration_string = if utils::get_num_digits(iterations, 10usize) < 10 {
+        "0".to_string() + &iterations.to_string()
+    } else {
+        iterations.to_string()
+    };
+
+    return Ok(date_filename + &iteration_string);
+}
+
+// Handler for post-tests logfile creation
+fn write_logfile(log_buffer: Option<String>, directory: PathBuf) {
+    if log_buffer.is_some() {
+        let filename = construct_logfile_name(directory);
+        let filename_ref;
+
+        let file_path = path::Path::new(match filename{
+            Ok(name) => {
+                filename_ref = name;
+                &filename_ref
+            },
+            Err(error) => {
+                println!("Error while retrieving path to logfile: {}", error);
+                return;
+            }
+        });
+
+        let display = file_path.display();
+
+        let buffer = match log_buffer {
+            Some(buff) => buff,
+            None => "Log Buffer got corrupted.".to_string(),
+        };
+
+        // Open a file in write-only mode, creates file if nonexistant
+        let mut file = match fs::File::create(file_path) {
+            Err(why) => panic!("couldn't create {}: {}", display, why),
+            Ok(file) => file,
+        };
+
+        // Write log buffer into the file
+        match file.write_all(buffer.as_bytes()) {
+            Err(why) => panic!("couldn't write to {}: {}", display, why),
+            Ok(_) => println!("successfully wrote to {}", display),
+        }
+    }
+}
+
+// Logging handler, prints formatted_string if print_condition is true
+fn log(formatted_string: String, print_condition: Option<bool>, log_buffer: &mut Option<String> /*IN-OUT*/) {
+    if let Some(condition) = print_condition {
+        printlnif!(condition, "{}", formatted_string);
+        if let Some(buffer) = log_buffer { 
+            *buffer += &formatted_string;
+        };
+    };
+}
+
+// Reads in the config file
 pub fn get_config_file() -> path::PathBuf {
     let args = cli::Args::parse();
 
@@ -92,7 +182,7 @@ fn validate_http_method(method: &String) -> Option<HttpMethod> {
          http_method.to_string() == method.to_string().to_lowercase());
 }
 
-async fn fetch_url(test_request: &mut TestRequest<'_>)
+async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<String> /*IN-OUT*/)
      -> Result<hyper::Response<hyper::Body>> {
      
     // TLS implementation to enable https requests
@@ -115,15 +205,12 @@ async fn fetch_url(test_request: &mut TestRequest<'_>)
         Some(token) => {
             let mut composed_token = String::from("");
             composed_token += "Bearer ";
-            println!("Token: {}", token);
+            log(format!("Token: {}", token), Some(true), log_buffer);
             composed_token += &token.clone();
 
-            match req_builder.headers_mut() {
-                Some(map) => {
-                    println!("Composed token: {}", composed_token);
-                    map.insert("Authorization", composed_token.parse::<HeaderValue>()?);
-                },
-                None => (),
+            if let Some(map) = req_builder.headers_mut() {
+                println!("Composed token: {}", composed_token);
+                map.insert("Authorization", composed_token.parse::<HeaderValue>()?);
             };
         },
         None => (),
@@ -186,6 +273,12 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         }
     };
 
+    // Set buffer to Some if a destination directory is specified
+    let mut log_buffer: Option<String> = None;
+    if rest_test_config.to_file.is_some() { 
+        log_buffer = Some(Default::default());
+    };
+
     let api_address = &rest_test_config.api_address;
 
     // Get verbose value, default to false
@@ -218,7 +311,8 @@ pub async fn execute_tests(config_file: path::PathBuf) {
 
         // Print test description if available
         match &test.it { 
-            Some(description) => println!("{}", description),
+            Some(description) => log(description.clone(),
+             Some(true), &mut log_buffer),
             None => (),
         };
 
@@ -251,7 +345,7 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         // Create buffer for the response body
         let mut buffer = bytes::BytesMut::with_capacity(512);
 
-        printlnif!(verbose, "Capture Key: {}", test.bearer_token.clone().unwrap_or("".to_string()));
+        printlnif!(verbose, "Capture Key: {}", test.bearer_token.clone().unwrap_or_default());
 
         // Construct request data struct
         let mut test_request = TestRequest {
@@ -262,14 +356,11 @@ pub async fn execute_tests(config_file: path::PathBuf) {
             body,
             response_time: &mut response_time,
             buffer: &mut buffer,
-            bearer_token: match captures.get(&test.bearer_token.clone().unwrap_or("".to_string())) {
-                Some(val) => Some(val.clone()),
-                None => None,
-            },
+            bearer_token: captures.get(&test.bearer_token.clone().unwrap_or_default()).cloned(),
         };
 
         // Send the request and get the response
-        let response = match fetch_url(&mut test_request).await {
+        let response = match fetch_url(&mut test_request, &mut log_buffer).await {
             Ok(res) => res,
             Err(error) => { 
                 println!("Error while sending request: {}", error);
@@ -344,5 +435,9 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         }
     }
 
-    println!("{} out of {} tests passed.", tests_passed, test_count)
+    println!("{} out of {} tests passed.", tests_passed, test_count);
+
+    if let Some(directory) = rest_test_config.to_file { 
+        write_logfile(log_buffer, directory);
+    };
 }
