@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::{io, io::Write, fs, path};
+use std::{io::Write, fs, path};
 use std::time::{Instant, Duration};
 
 use hyper::http::HeaderValue;
@@ -18,15 +18,6 @@ mod utils;
 mod cli;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-// Prints a string and appens a newline if a given condition evaluates to true
-macro_rules! printlnif {
-    ($condition: expr, $($x:tt)*) => { 
-        if $condition { 
-            println!($($x)*);
-        }
-    }
-}
 
 #[allow(non_camel_case_types)]
 #[derive(strum_macros::Display, EnumIter)]
@@ -52,6 +43,7 @@ struct Endpoint {
     capture: Option<HashMap<String, String>>,
     bearer_token: Option<String>,
     auto_description: Option<bool>,
+    verbose: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,15 +82,18 @@ fn get_file_iteration(directory: path::PathBuf, pattern: &String) -> Result<usiz
 // Creates the name of the logfile based on the current time
 fn construct_logfile_name(directory: PathBuf) -> Result<String> {
     // rrt-YEAR-MONTH-DAY-ITERATOR.log
-    // rrt-2023-07-01-00.log
-    // rrt-2023-07-01-01.log etc
+    // rrt-23-07-01-00.log
+    // rrt-23-07-01-01.log etc
     let current_date = chrono::Utc::now().date_naive();
+    let month = current_date.month();
+    let day = current_date.day();
 
     let date_filename = format!(
-        "rrt-{}-{}-{}",
+        "rrt-{}-{}-{}-",
         current_date.year() - 2000,
-        current_date.month0(),
-        current_date.day0());
+        // Prepend 0 to single digit months and days
+        if month > 9 { month.to_string() } else { "0".to_string() + &month.to_string() },
+        if day > 9 { day.to_string() } else { "0".to_string() + &day.to_string() });
 
     let iterations = get_file_iteration(directory, &date_filename)?;
 
@@ -109,7 +104,7 @@ fn construct_logfile_name(directory: PathBuf) -> Result<String> {
         iterations.to_string()
     };
 
-    return Ok(date_filename + &iteration_string);
+    return Ok(date_filename + &iteration_string + ".log");
 }
 
 // Handler for post-tests logfile creation
@@ -138,14 +133,24 @@ fn write_logfile(log_buffer: Option<String>, directory: PathBuf) {
 
         // Open a file in write-only mode, creates file if nonexistant
         let mut file = match fs::File::create(file_path) {
-            Err(why) => panic!("couldn't create {}: {}", display, why),
+            Err(why) => panic!("Couldn't create {}: {}", display, why),
             Ok(file) => file,
         };
 
-        // Write log buffer into the file
-        match file.write_all(buffer.as_bytes()) {
-            Err(why) => panic!("couldn't write to {}: {}", display, why),
-            Ok(_) => println!("successfully wrote to {}", display),
+        // Remove ANSI escape sequences
+        let byte_buffer = buffer.as_bytes();
+        let stripped_buffer = match strip_ansi_escapes::strip(byte_buffer) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                println!("Error while preparing log file output: {}", error);
+                return;
+            },
+        };
+
+        // Write log buffer to the file
+        match file.write_all(&stripped_buffer) {
+            Err(error) => panic!("Couldn't write to {}: {}", display, error),
+            Ok(_) => println!("Successfully wrote to {}", display),
         }
     }
 }
@@ -153,9 +158,11 @@ fn write_logfile(log_buffer: Option<String>, directory: PathBuf) {
 // Logging handler, prints formatted_string if print_condition is true
 fn log(formatted_string: String, print_condition: Option<bool>, log_buffer: &mut Option<String> /*IN-OUT*/) {
     if let Some(condition) = print_condition {
-        printlnif!(condition, "{}", formatted_string);
+        printif!(condition, "{}", formatted_string);
         if let Some(buffer) = log_buffer { 
-            *buffer += &formatted_string;
+            if condition {
+                *buffer += &formatted_string;
+            }
         };
     };
 }
@@ -205,11 +212,12 @@ async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<S
         Some(token) => {
             let mut composed_token = String::from("");
             composed_token += "Bearer ";
-            log(format!("Token: {}", token), Some(true), log_buffer);
+            log(format!("Token: {}\n", token), Some(test_request.verbose), log_buffer);
             composed_token += &token.clone();
 
             if let Some(map) = req_builder.headers_mut() {
-                println!("Composed token: {}", composed_token);
+                log(format!("Composed token: {}\n",
+                 composed_token), Some(test_request.verbose), log_buffer);
                 map.insert("Authorization", composed_token.parse::<HeaderValue>()?);
             };
         },
@@ -237,18 +245,20 @@ async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<S
 
     *test_request.response_time = now.elapsed().as_millis();
 
-    println!("Response Status: {}", response.status());
+    log(format!("Response Status: {}\n", response.status()), Some(true), log_buffer);
 
     // stream body data into buffer
     while let Some(next) = response.data().await {
         test_request.buffer.put(next?);
     }
 
-    printlnif!(test_request.verbose, "Response Header: {:#?}", response.headers());
+    log(format!("Response Header: {:#?}\n", response.headers()),
+     Some(test_request.verbose), log_buffer);
 
-    if !test_request.buffer.is_empty() {
-        printlnif!(test_request.verbose, "Response Body: ");
-        io::Write::write_all(&mut io::stdout(), test_request.buffer)?;
+    if !test_request.buffer.is_empty() && test_request.verbose {
+        log("Response Body: ".to_string(), Some(true), log_buffer);
+        log(String::from_utf8_lossy(test_request.buffer).to_string() + "\n",
+         Some(true), log_buffer);
     }
 
     return Ok(response);
@@ -282,7 +292,7 @@ pub async fn execute_tests(config_file: path::PathBuf) {
     let api_address = &rest_test_config.api_address;
 
     // Get verbose value, default to false
-    let verbose = rest_test_config.verbose.unwrap_or(false);
+    let global_verbose = rest_test_config.verbose.unwrap_or(false);
 
     let test_count = rest_test_config.tests.len();
     let mut test_index = 0;
@@ -297,6 +307,12 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         let mut response_time: u128 = 0;
         test_index += 1;
 
+        // Local verbosity is of higher precedence
+        let verbose = match test.verbose {
+            Some(condition) => condition,
+            None => global_verbose,
+        };
+
         // Determine criticalness, default to false
         let is_critical = test.critical.unwrap_or(false);
 
@@ -307,11 +323,12 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         };
 
         // Print current test index
-        println!("Test {}/{}", test_index, test_count);
+        log(format!("Test {}/{}\n", test_index, test_count).bold().bright_blue().to_string(),
+         Some(true), &mut log_buffer);
 
         // Print test description if available
         match &test.it { 
-            Some(description) => log(description.clone(),
+            Some(description) => log(description.clone() + "\n",
              Some(true), &mut log_buffer),
             None => (),
         };
@@ -345,7 +362,8 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         // Create buffer for the response body
         let mut buffer = bytes::BytesMut::with_capacity(512);
 
-        printlnif!(verbose, "Capture Key: {}", test.bearer_token.clone().unwrap_or_default());
+        log(format!("Capture Key: {}", test.bearer_token.clone().unwrap_or_default()),
+         Some(verbose), &mut log_buffer);
 
         // Construct request data struct
         let mut test_request = TestRequest {
@@ -363,9 +381,11 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         let response = match fetch_url(&mut test_request, &mut log_buffer).await {
             Ok(res) => res,
             Err(error) => { 
-                println!("Error while sending request: {}", error);
+                log(format!("Error while sending request: {}\n", error),
+                 Some(true), &mut log_buffer);
                 if is_critical {
-                    println!("Test marked as 'critical' failed, cancelling all further tests.");
+                    log("Test marked as 'critical' failed, cancelling all further tests.\n".to_string(),
+                    Some(true), &mut log_buffer);
                     return;
                 }
                 continue
@@ -379,7 +399,8 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         let json_body: serde_json::Value = match serde_json::from_str(&String::from_utf8_lossy(&buffer)) {
                 Ok(value) => value,
                 Err(error) => {
-                    println!("Error while parsing response body as json: {}\n", error);
+                    log(format!("Error while parsing response body as json: {}\n", error),
+                     Some(true), &mut log_buffer);
                     continue;
                 },
             };
@@ -400,7 +421,7 @@ pub async fn execute_tests(config_file: path::PathBuf) {
 
                             captures.insert(key.to_string(), string_captured);
                         } else {
-                            println!("Cannot capture nonexistent value '{}'", value.bold());
+                            println!("Error: Cannot capture nonexistent value '{}'", value.bold());
                         }
                     }
                 },
@@ -411,31 +432,38 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         let response_time_output = format!("Response time: {} ms", response_time);
 
         if response_time < time_boundaries[0] {
-            println!("{}", response_time_output.green());
+            log(format!("{}\n", response_time_output.green()),
+             Some(true), &mut log_buffer);
         } else if response_time < time_boundaries[1] {
-            println!("{}", response_time_output.yellow());
+            log(format!("{}\n", response_time_output.yellow()),
+             Some(true), &mut log_buffer);
         } else {
-            println!("{}", response_time_output.red());
+            log(format!("{}\n", response_time_output.red()),
+             Some(true), &mut log_buffer);
         }
  
         // Check expectations
-        println!("Expected Status: {}", test.status);
+        log(format!("Expected Status: {}\n", test.status),
+         Some(true), &mut log_buffer);
 
         // Print outcome
         if response_status == test.status {
             tests_passed += 1;
-            println!("{}", "TEST PASSED\n".green().bold())
+            log(format!("{}", "TEST PASSED\n\n".green().bold()), 
+             Some(true), &mut log_buffer);
         } else {
             if is_critical {
                 println!("Test marked as 'critical' failed, cancelling all further tests.");
                 return;
             }
 
-            println!("{}", "TEST FAILED\n".red().bold())
+            log(format!("{}", "TEST FAILED\n\n".red().bold()), 
+             Some(true), &mut log_buffer);
         }
     }
 
-    println!("{} out of {} tests passed.", tests_passed, test_count);
+    log(format!("{} out of {} tests passed.", 
+     tests_passed, test_count), Some(true), &mut log_buffer);
 
     if let Some(directory) = rest_test_config.to_file { 
         write_logfile(log_buffer, directory);

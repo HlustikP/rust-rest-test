@@ -17,3 +17,23 @@ pub fn get_num_digits<T: std::ops::Div<T, Output = T> + std::cmp::PartialOrd + s
 
     return iterations;
 }
+
+// Prints a string and appends a newline if a given condition evaluates to true
+#[macro_export]
+macro_rules! printlnif {
+    ($condition: expr, $($x:tt)*) => { 
+        if $condition { 
+            println!($($x)*);
+        }
+    }
+}
+
+// Prints a string if a given condition evaluates to true
+#[macro_export]
+macro_rules! printif {
+    ($condition: expr, $($x:tt)*) => { 
+        if $condition { 
+            println!($($x)*);
+        }
+    }
+}
