@@ -167,6 +167,11 @@ fn log(formatted_string: String, print_condition: Option<bool>, log_buffer: &mut
     };
 }
 
+// Generates a generic test case description
+fn generate_description(status: u16, method: String, route: String) -> String {
+    return format!("gets a Status {} when sending a {} request to the {} route.", status, method, route);
+}
+
 // Reads in the config file
 pub fn get_config_file() -> path::PathBuf {
     let args = cli::Args::parse();
@@ -330,7 +335,18 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         match &test.it { 
             Some(description) => log(description.clone() + "\n",
              Some(true), &mut log_buffer),
-            None => (),
+            None => {
+                match test.auto_description {
+                    Some(condition) => { if condition {
+                        log(generate_description(test.status,
+                         test.method.clone(), test.route.clone()),
+                    Some(true), &mut log_buffer);
+                    } },
+                    None => log(generate_description(test.status,
+                         test.method.clone(), test.route.clone()),
+                    Some(true), &mut log_buffer),
+                }
+            },
         };
 
         // Check if the http method is valid
