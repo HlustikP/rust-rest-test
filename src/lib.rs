@@ -5,7 +5,7 @@ use std::time::{Instant, Duration};
 
 use hyper::http::HeaderValue;
 use serde::{Serialize, Deserialize};
-use hyper::{body::HttpBody as _};
+use hyper::{body::HttpBody as _, client};
 use hyper_tls::HttpsConnector;
 use strum_macros::EnumIter;
 use strum::IntoEnumIterator;
@@ -44,6 +44,8 @@ struct Endpoint {
     bearer_token: Option<String>,
     auto_description: Option<bool>,
     verbose: Option<bool>,
+    repeat: Option<u32>,
+    parallel: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -65,6 +67,8 @@ struct TestRequest<'a> {
     response_time: &'a mut u128,
     buffer: &'a mut bytes::BytesMut,
     bearer_token: Option<String>,
+    //iterations: u32,
+    //parallel: bool,
 }
 
 // Get the number of files matching a certain pattern inside a directory
@@ -133,7 +137,7 @@ fn write_logfile(log_buffer: Option<String>, directory: PathBuf) {
 
         // Open a file in write-only mode, creates file if nonexistant
         let mut file = match fs::File::create(file_path) {
-            Err(why) => panic!("Couldn't create {}: {}", display, why),
+            Err(error) => panic!("Couldn't create {}: {}", display, error),
             Ok(file) => file,
         };
 
@@ -194,6 +198,67 @@ fn validate_http_method(method: &String) -> Option<HttpMethod> {
          http_method.to_string() == method.to_string().to_lowercase());
 }
 
+// Parse the response body as long as its not empty and (probably) a json
+fn parse_json_response(response_buffer: bytes::BytesMut, captures: &mut HashMap<String, String>,
+     test: &Endpoint, log_buffer: &mut Option<String>) {
+
+    if !response_buffer.is_empty() && response_buffer[0] == b'{' {
+        let json_body: serde_json::Value = match serde_json::from_str(&String::from_utf8_lossy(&response_buffer)) {
+                Ok(value) => value,
+                Err(error) => {
+                    log(format!("Error while parsing response body as json: {}\n", error),
+                        Some(true), log_buffer);
+                    return;
+                },
+            };
+    
+            // Capture desired values from the response body
+            match &test.capture {
+                Some(capture) => {
+                    for (key, value) in capture.iter() {
+                        let captured_value = &json_body["data"][value];
+                        if !captured_value.is_null() {
+                            let mut string_captured = json_body["data"][value].to_string();
+
+                            // Remove Double Quotes
+                            string_captured.pop();
+                            if !string_captured.is_empty() {
+                                string_captured.remove(0);
+                            }
+
+                            captures.insert(key.to_string(), string_captured);
+                        } else {
+                            println!("Error: Cannot capture nonexistent value '{}'", value.bold());
+                        }
+                    }
+                },
+                None => (),
+            }
+        }
+}
+
+async fn create_and_send_request(test_request: &mut TestRequest<'_>, 
+     client: hyper::Client<HttpsConnector<client::HttpConnector>>, request: hyper::Request<hyper::Body>)
+     -> Result<hyper::Response<hyper::Body>> {
+
+    let now = Instant::now();
+
+    let future_response = client.request(request);
+
+    let response = match tokio::time::timeout(Duration::from_millis(test_request.timeout.try_into().unwrap()),
+        future_response).await {
+        Ok(result) => match result {
+            Ok(res) => res,
+            Err(e) => return Err(Box::new(e)),
+        },
+        Err(_) => return Err("Request timed out.".into()),
+    };
+
+    *test_request.response_time = now.elapsed().as_millis();
+
+    return Ok(response);
+}
+
 async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<String> /*IN-OUT*/)
      -> Result<hyper::Response<hyper::Body>> {
      
@@ -230,25 +295,14 @@ async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<S
     };
 
     let req = req_builder.body(hyper::Body::from(test_request.body.clone()))?;
-
     let client = hyper::Client::builder().build(https);
 
-    let now = Instant::now();
+    let possible_response = create_and_send_request(test_request, client, req);
 
-    let future_response = client.request(req);
-
-    let mut response: hyper:: Response<hyper::Body>;
-
-    response = match tokio::time::timeout(Duration::from_millis(test_request.timeout.try_into().unwrap()),
-     future_response).await {
-        Ok(result) => match result {
-            Ok(res) => res,
-            Err(e) => return Err(Box::new(e)),
-        },
-        Err(_) => return Err("Request timed out.".into()),
+    let mut response = match possible_response.await{
+        Ok(res) => res,
+        Err(error) => return Err(error),
     };
-
-    *test_request.response_time = now.elapsed().as_millis();
 
     log(format!("Response Status: {}\n", response.status()), Some(true), log_buffer);
 
@@ -410,40 +464,7 @@ pub async fn execute_tests(config_file: path::PathBuf) {
 
         let response_status = response.status();
 
-        // Parse the response body as long as its not empty and (probably) a json
-        if !buffer.is_empty() && buffer[0] == b'{' {
-        let json_body: serde_json::Value = match serde_json::from_str(&String::from_utf8_lossy(&buffer)) {
-                Ok(value) => value,
-                Err(error) => {
-                    log(format!("Error while parsing response body as json: {}\n", error),
-                     Some(true), &mut log_buffer);
-                    continue;
-                },
-            };
-    
-            // Capture desired values from the response body
-            match &test.capture {
-                Some(capture) => {
-                    for (key, value) in capture.iter() {
-                        let captured_value = &json_body["data"][value];
-                        if !captured_value.is_null() {
-                            let mut string_captured = json_body["data"][value].to_string();
-
-                            // Remove Double Quotes
-                            string_captured.pop();
-                            if !string_captured.is_empty() {
-                                string_captured.remove(0);
-                            }
-
-                            captures.insert(key.to_string(), string_captured);
-                        } else {
-                            println!("Error: Cannot capture nonexistent value '{}'", value.bold());
-                        }
-                    }
-                },
-                None => (),
-            }
-        }
+        parse_json_response(buffer, &mut captures, test, &mut log_buffer);
 
         let response_time_output = format!("Response time: {} ms", response_time);
 
