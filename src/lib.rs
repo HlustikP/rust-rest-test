@@ -42,6 +42,7 @@ struct Endpoint {
     time_boundaries: Option<[u128; 3]>, // (green), yellow, red, timeout
     capture: Option<HashMap<String, String>>,
     bearer_token: Option<String>,
+    session_id: Option<String>,
     auto_description: Option<bool>,
     verbose: Option<bool>,
     repeat: Option<u32>,
@@ -67,6 +68,7 @@ struct TestRequest<'a> {
     response_time: &'a mut u128,
     buffer: &'a mut bytes::BytesMut,
     bearer_token: Option<String>,
+    session_id: Option<String>,
     //iterations: u32,
     //parallel: bool,
 }
@@ -216,9 +218,9 @@ fn parse_json_response(response_buffer: bytes::BytesMut, captures: &mut HashMap<
             match &test.capture {
                 Some(capture) => {
                     for (key, value) in capture.iter() {
-                        let captured_value = &json_body["data"][value];
+                        let captured_value = &json_body[value];
                         if !captured_value.is_null() {
-                            let mut string_captured = json_body["data"][value].to_string();
+                            let mut string_captured = json_body[value].to_string();
 
                             // Remove Double Quotes
                             string_captured.pop();
@@ -282,7 +284,7 @@ async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<S
         Some(token) => {
             let mut composed_token = String::from("");
             composed_token += "Bearer ";
-            log(format!("Token: {}\n", token), Some(test_request.verbose), log_buffer);
+            log(format!("Bearer Token: {}\n", token), Some(test_request.verbose), log_buffer);
             composed_token += &token.clone();
 
             if let Some(map) = req_builder.headers_mut() {
@@ -293,6 +295,28 @@ async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<S
         },
         None => (),
     };
+
+    match &test_request.session_id {
+        Some(token) => {
+            let mut composed_token = String::from("");
+            composed_token += "connect.sid=";
+            log(format!("Session Token: {}\n", token), Some(test_request.verbose), log_buffer);
+            composed_token += &token.clone();
+
+            if let Some(map) = req_builder.headers_mut() {
+                log(format!("Composed token: {}\n",
+                 composed_token), Some(test_request.verbose), log_buffer);
+                map.insert("Cookie", composed_token.parse::<HeaderValue>()?);
+            };
+        },
+        None => (),
+    };
+
+    if test_request.body.len() > 0 {
+        if let Some(map) = req_builder.headers_mut() {
+            map.insert("Content-Type", HeaderValue::from_static("application/json"));
+        }
+    }
 
     let req = req_builder.body(hyper::Body::from(test_request.body.clone()))?;
     let client = hyper::Client::builder().build(https);
@@ -427,7 +451,10 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         if body.ends_with(',') {
             body.pop();
         }
-        body += "}";
+        
+        if body.len() > 0 {
+            body += "}";
+        }
 
         // Create buffer for the response body
         let mut buffer = bytes::BytesMut::with_capacity(512);
@@ -445,6 +472,7 @@ pub async fn execute_tests(config_file: path::PathBuf) {
             response_time: &mut response_time,
             buffer: &mut buffer,
             bearer_token: captures.get(&test.bearer_token.clone().unwrap_or_default()).cloned(),
+            session_id: captures.get(&test.session_id.clone().unwrap_or_default()).cloned(),
         };
 
         // Send the request and get the response
