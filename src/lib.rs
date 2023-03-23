@@ -13,6 +13,7 @@ use colored::*;
 use bytes::BufMut;
 use clap::Parser;
 use chrono::{self, Datelike};
+use cookie::{Cookie, CookieJar};
 
 mod utils;
 mod cli;
@@ -68,7 +69,7 @@ struct TestRequest<'a> {
     response_time: &'a mut u128,
     buffer: &'a mut bytes::BytesMut,
     bearer_token: Option<String>,
-    session_id: Option<String>,
+    cookie_jar: &'a CookieJar,
     //iterations: u32,
     //parallel: bool,
 }
@@ -212,40 +213,64 @@ fn parse_json_response(response_buffer: bytes::BytesMut, captures: &mut HashMap<
                         Some(true), log_buffer);
                     return;
                 },
-            };
+        };
     
-            // Capture desired values from the response body
-            match &test.capture {
-                Some(capture) => {
-                    for (key, value) in capture.iter() {
-                        let captured_value = &json_body[value];
-                        if !captured_value.is_null() {
-                            let mut string_captured = json_body[value].to_string();
+        // Capture desired values from the response body
+        match &test.capture {
+            Some(capture) => {
+                for (key, value) in capture.iter() {
+                    let captured_value = &json_body[value];
+                    if !captured_value.is_null() {
+                        let mut string_captured = json_body[value].to_string();
 
-                            // Remove Double Quotes
-                            string_captured.pop();
-                            if !string_captured.is_empty() {
-                                string_captured.remove(0);
-                            }
-
-                            captures.insert(key.to_string(), string_captured);
-                        } else {
-                            println!("Error: Cannot capture nonexistent value '{}'", value.bold());
+                        // Remove Double Quotes
+                        string_captured.pop();
+                        if !string_captured.is_empty() {
+                            string_captured.remove(0);
                         }
+
+                        captures.insert(key.to_string(), string_captured);
+                    } else {
+                        println!("Error: Cannot capture nonexistent value '{}'", value.bold());
                     }
-                },
-                None => (),
-            }
+                }
+            },
+            None => (),
         }
+    }
 }
+
+// fn set_cookies(
+//     headers: hyper::HeaderMap<HeaderValue>,
+//     log_buffer: &mut Option<String>,
+// ) -> Result<Cookie> {
+
+//     let cookie_entry = headers.get("set-cookie");
+//     if let Some(cookie_value) = cookie_entry {
+//         let cookie = match Cookie::parse(cookie_value.to_str().unwrap_or("")) {
+//             Ok(value) => value,
+//             Err(error) => {
+//                 log(
+//                     format!("Error while parsing cookie: {}\n", error),
+//                     Some(true),
+//                     log_buffer,
+//                 );
+//                 return Err(Box::new(error));
+//             }
+//         };
+//         return Ok(cookie);
+//     } else {
+//         return Err(Box::new(cookie::ParseError::MissingPair));
+//     }
+// }
 
 async fn create_and_send_request(test_request: &mut TestRequest<'_>, 
      client: hyper::Client<HttpsConnector<client::HttpConnector>>, request: hyper::Request<hyper::Body>)
      -> Result<hyper::Response<hyper::Body>> {
 
-    let now = Instant::now();
-
     let future_response = client.request(request);
+
+    let now = Instant::now();
 
     let response = match tokio::time::timeout(Duration::from_millis(test_request.timeout.try_into().unwrap()),
         future_response).await {
@@ -296,21 +321,24 @@ async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<S
         None => (),
     };
 
-    match &test_request.session_id {
-        Some(token) => {
-            let mut composed_token = String::from("");
-            composed_token += "connect.sid=";
-            log(format!("Session Token: {}\n", token), Some(test_request.verbose), log_buffer);
-            composed_token += &token.clone();
+    // Add acquired cookies to the request
+    for cookie in test_request.cookie_jar.iter() {
+        if let Some(map) = req_builder.headers_mut() {
+            if map.contains_key("Cookie") {
+                let existing_value = match map.get("Cookie"){
+                    Some(value) => {
+                        value.to_str().unwrap_or_default()
+                    },
+                    None => ""
+                };
 
-            if let Some(map) = req_builder.headers_mut() {
-                log(format!("Composed token: {}\n",
-                 composed_token), Some(test_request.verbose), log_buffer);
-                map.insert("Cookie", composed_token.parse::<HeaderValue>()?);
-            };
-        },
-        None => (),
-    };
+                map.insert("Cookie", format!("{};{}",
+                    existing_value, cookie.to_string()).parse::<HeaderValue>()?);
+            } else {
+                map.insert("Cookie", cookie.to_string().parse::<HeaderValue>()?);
+            }
+        }
+    }
 
     if test_request.body.len() > 0 {
         if let Some(map) = req_builder.headers_mut() {
@@ -385,6 +413,8 @@ pub async fn execute_tests(config_file: path::PathBuf) {
     let mut time_boundaries = rest_test_config.time_boundaries.unwrap_or([500, 1000, 10000]);
 
     let mut captures: HashMap<String, String> = Default::default();
+
+    let mut cookie_jar = CookieJar::new();
 
     for test in rest_test_config.tests.iter() {
         let mut response_time: u128 = 0;
@@ -472,7 +502,7 @@ pub async fn execute_tests(config_file: path::PathBuf) {
             response_time: &mut response_time,
             buffer: &mut buffer,
             bearer_token: captures.get(&test.bearer_token.clone().unwrap_or_default()).cloned(),
-            session_id: captures.get(&test.session_id.clone().unwrap_or_default()).cloned(),
+            cookie_jar: &cookie_jar
         };
 
         // Send the request and get the response
@@ -494,8 +524,43 @@ pub async fn execute_tests(config_file: path::PathBuf) {
 
         parse_json_response(buffer, &mut captures, test, &mut log_buffer);
 
+        //add_cookie_to_jar(response.headers(), &mut cookie_jar, &mut log_buffer);
+
+        // match set_cookies(*response.headers(), &mut log_buffer) {
+        //     Ok(value) => cookie_jar.add(value),
+        //     Err(error) => {
+        //         // log(format!("{}\n", error),
+        //         // Some(true), &mut log_buffer);
+        //     }
+        // }
+
+        // If "set-cookie" header exists, add the cookie to the cookie jar
+        let cookie_entry = response.headers().get("set-cookie");
+        if let Some(cookie_value) = cookie_entry {
+            match Cookie::parse(cookie_value.to_str().unwrap_or("")) {
+                Ok(value) => {
+                    let cookie_data = value.name_value();
+                    let cookie_name = cookie_data.0.to_owned();
+                    let cookie_value = cookie_data.1.to_owned();
+                    cookie_jar.add(Cookie::new(cookie_name, cookie_value));
+                },
+                Err(error) => {
+                    log(
+                        format!("Error while parsing cookie: {}\n", error),
+                        Some(true),
+                        &mut log_buffer,
+                    );
+                }
+            };
+        }
+
+        // let v = cookie.unwrap().name_value();
+
+        // cookie_jar.add(Cookie::new(v.0, v,1));
+
         let response_time_output = format!("Response time: {} ms", response_time);
 
+        // Evaluate the response time
         if response_time < time_boundaries[0] {
             log(format!("{}\n", response_time_output.green()),
              Some(true), &mut log_buffer);
