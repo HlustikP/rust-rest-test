@@ -440,8 +440,8 @@ pub async fn execute_tests(config_file: path::PathBuf) {
          Some(true), &mut log_buffer);
 
         // Print test description if available
-        match &test.it { 
-            Some(description) => log(description.clone() + "\n",
+        match &test.it {
+            Some(description) => log(format!("{}\n", description.clone().yellow()),
              Some(true), &mut log_buffer),
             None => {
                 match test.auto_description {
