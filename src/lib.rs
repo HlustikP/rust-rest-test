@@ -240,31 +240,8 @@ fn parse_json_response(response_buffer: bytes::BytesMut, captures: &mut HashMap<
     }
 }
 
-// fn set_cookies(
-//     headers: hyper::HeaderMap<HeaderValue>,
-//     log_buffer: &mut Option<String>,
-// ) -> Result<Cookie> {
-
-//     let cookie_entry = headers.get("set-cookie");
-//     if let Some(cookie_value) = cookie_entry {
-//         let cookie = match Cookie::parse(cookie_value.to_str().unwrap_or("")) {
-//             Ok(value) => value,
-//             Err(error) => {
-//                 log(
-//                     format!("Error while parsing cookie: {}\n", error),
-//                     Some(true),
-//                     log_buffer,
-//                 );
-//                 return Err(Box::new(error));
-//             }
-//         };
-//         return Ok(cookie);
-//     } else {
-//         return Err(Box::new(cookie::ParseError::MissingPair));
-//     }
-// }
-
-async fn create_and_send_request(test_request: &mut TestRequest<'_>, 
+// Sends the request and returns the awaited response
+async fn send_request(test_request: &mut TestRequest<'_>, 
      client: hyper::Client<HttpsConnector<client::HttpConnector>>, request: hyper::Request<hyper::Body>)
      -> Result<hyper::Response<hyper::Body>> {
 
@@ -286,6 +263,7 @@ async fn create_and_send_request(test_request: &mut TestRequest<'_>,
     return Ok(response);
 }
 
+// Builds a new request and sends it to the target
 async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<String> /*IN-OUT*/)
      -> Result<hyper::Response<hyper::Body>> {
      
@@ -349,7 +327,7 @@ async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<S
     let req = req_builder.body(hyper::Body::from(test_request.body.clone()))?;
     let client = hyper::Client::builder().build(https);
 
-    let possible_response = create_and_send_request(test_request, client, req);
+    let possible_response = send_request(test_request, client, req);
 
     let mut response = match possible_response.await{
         Ok(res) => res,
@@ -375,6 +353,7 @@ async fn fetch_url(test_request: &mut TestRequest<'_>, log_buffer: &mut Option<S
     return Ok(response);
 }
 
+// Core unit test function that parses the config and executes the defined tests
 pub async fn execute_tests(config_file: path::PathBuf) {
     // Open and read config file
     let test_config_file = match fs::File::open(config_file) {
@@ -400,6 +379,7 @@ pub async fn execute_tests(config_file: path::PathBuf) {
         log_buffer = Some(Default::default());
     };
 
+    // The target address
     let api_address = &rest_test_config.api_address;
 
     // Get verbose value, default to false
@@ -412,8 +392,10 @@ pub async fn execute_tests(config_file: path::PathBuf) {
     // Get boundaries, set to default values if not found
     let mut time_boundaries = rest_test_config.time_boundaries.unwrap_or([500, 1000, 10000]);
 
+    // Container for user-defined captured values
     let mut captures: HashMap<String, String> = Default::default();
 
+    // Storage for captured cookies
     let mut cookie_jar = CookieJar::new();
 
     for test in rest_test_config.tests.iter() {
@@ -524,16 +506,6 @@ pub async fn execute_tests(config_file: path::PathBuf) {
 
         parse_json_response(buffer, &mut captures, test, &mut log_buffer);
 
-        //add_cookie_to_jar(response.headers(), &mut cookie_jar, &mut log_buffer);
-
-        // match set_cookies(*response.headers(), &mut log_buffer) {
-        //     Ok(value) => cookie_jar.add(value),
-        //     Err(error) => {
-        //         // log(format!("{}\n", error),
-        //         // Some(true), &mut log_buffer);
-        //     }
-        // }
-
         // If "set-cookie" header exists, add the cookie to the cookie jar
         let cookie_entry = response.headers().get("set-cookie");
         if let Some(cookie_value) = cookie_entry {
@@ -553,10 +525,6 @@ pub async fn execute_tests(config_file: path::PathBuf) {
                 }
             };
         }
-
-        // let v = cookie.unwrap().name_value();
-
-        // cookie_jar.add(Cookie::new(v.0, v,1));
 
         let response_time_output = format!("Response time: {} ms", response_time);
 
