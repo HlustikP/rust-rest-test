@@ -1,0 +1,27 @@
+{
+    "name": "rust-rest-test",
+    "version": "0.1.0",
+    "description": "Rest Test framework written in Rust",
+    "main": "rrt.js",
+    "bin": "rrt.js",
+    "scripts": {
+      "build": "cargo-cp-artifact -nc rrt.node -- cargo build -r --message-format=json-render-diagnostics",
+      "install": "npm run build"
+    },
+    "license": "MIT",
+    "devDependencies": {
+      "cargo-cp-artifact": "^0.1"
+    },
+    "keywords": [
+      "Neon",
+      "Rest",
+      "Rust",
+      "Testing",
+      "Unit Tests"
+    ],
+    "bugs": {
+      "url": "https://github.com/HlustikP/rust-rest-test/issues"
+    },
+    "homepage": "https://github.com/HlustikP/rust-rest-test/"
+  }
+  

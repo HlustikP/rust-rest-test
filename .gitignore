@@ -1,3 +1,8 @@
-/target
+# Rust
+target/
 *.yaml
 *.log
+
+# Node
+node_modules/
+*.node

@@ -14,6 +14,8 @@ use bytes::BufMut;
 use clap::Parser;
 use chrono::{self, Datelike};
 use cookie::{Cookie, CookieJar};
+use neon::prelude::*;
+use tokio::runtime::Runtime;
 
 mod utils;
 mod cli;
@@ -566,4 +568,23 @@ pub async fn execute_tests(config_file: path::PathBuf) {
     if let Some(directory) = rest_test_config.to_file { 
         write_logfile(log_buffer, directory);
     };
+}
+
+fn neon_wrapper(mut ctx: FunctionContext) -> JsResult<JsBoolean> {
+    let test_file = get_config_file();
+
+    let rt = Runtime::new().unwrap();
+
+    // Block the main thread until the async operation completes
+    rt.block_on(async {
+        execute_tests(test_file).await;
+    });
+
+    return Ok(ctx.boolean(true));
+}
+
+#[neon::main]
+fn neon_main(mut ctx: ModuleContext) -> NeonResult<()> {
+    ctx.export_function("execute_tests", neon_wrapper)?;
+    return Ok(());
 }

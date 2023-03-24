@@ -9,6 +9,11 @@ license = "MIT"
 name = "rrt"
 path = "src/main.rs"
 
+[lib]
+crate-type = ["lib", "cdylib"]
+name = "rrtlib"
+path = "src/lib.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9.16"
@@ -24,3 +29,6 @@ clap = { version = "4.0.32", features = ["derive"] }
 chrono = "0.4.23"
 strip-ansi-escapes = "0.1.1"
 cookie = "0.17"
+
+[dependencies.neon]
+features = ["napi-6"]
