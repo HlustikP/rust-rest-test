@@ -6,7 +6,8 @@
     "bin": "rrt.js",
     "scripts": {
       "build": "cargo-cp-artifact -nc rrt.node -- cargo build -r --message-format=json-render-diagnostics",
-      "install": "npm run build"
+      "install": "npm run build",
+      "rrt": "node rrt.js"
     },
     "license": "MIT",
     "devDependencies": {
@@ -24,4 +25,3 @@
     },
     "homepage": "https://github.com/HlustikP/rust-rest-test/"
   }
-  

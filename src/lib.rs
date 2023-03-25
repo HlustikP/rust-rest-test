@@ -571,13 +571,11 @@ pub async fn execute_tests(config_file: path::PathBuf) {
 }
 
 fn neon_wrapper(mut ctx: FunctionContext) -> JsResult<JsBoolean> {
-    let test_file = get_config_file();
-
     let rt = Runtime::new().unwrap();
 
     // Block the main thread until the async operation completes
     rt.block_on(async {
-        execute_tests(test_file).await;
+        execute_tests(utils::get_cwd().join("./rest-test.yaml")).await;
     });
 
     return Ok(ctx.boolean(true));
