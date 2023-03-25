@@ -818,7 +818,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust-rest-test"
+name = "rrt"
 version = "0.1.0"
 dependencies = [
  "bytes",

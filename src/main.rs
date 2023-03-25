@@ -1,4 +1,4 @@
-use rust_rest_test::{ get_config_file, execute_tests };
+use rrt::{ get_config_file, execute_tests };
 
 #[tokio::main]
 async fn main() {
